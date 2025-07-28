@@ -77,8 +77,8 @@ class SymbolConfigLoader:
                         base_currency=row['BaseCurrency'],
                         profit_currency=row['ProfitCurrency']
                     )
-                    # Remove trailing dash if present
-                    clean_symbol = config.symbol.rstrip('-')
+                    # Remove trailing dash or dot extensions if present
+                    clean_symbol = config.symbol.rstrip('-.')
                     self.symbols[clean_symbol] = config
                 except Exception as row_error:
                     print(f"Warning: Skipping malformed row: {row_error}")
@@ -102,9 +102,10 @@ class SymbolConfigLoader:
         if clean_symbol in self.symbols:
             return self.symbols[clean_symbol]
         
-        # Try case insensitive
+        # Try case insensitive matching
+        symbol_upper = symbol.upper()
         for sym, config in self.symbols.items():
-            if sym.upper() == symbol.upper():
+            if sym.upper() == symbol_upper:
                 return config
                 
         return None
@@ -611,21 +612,40 @@ class MultiSymbolAspectCalculator:
         
         return all_aspects
     
-    def detect_all_symbol_vibrations(self, max_symbols: int = None) -> Dict[str, VibrationLaw]:
+    def detect_all_symbol_vibrations(self, max_symbols: int = None, specific_symbol: str = None) -> Dict[str, VibrationLaw]:
         """
-        Automatically detect vibration laws for all symbols from symbol_discovery.csv
+        Automatically detect vibration laws for symbols from symbol_discovery.csv
         Gets historical data from MT5 and finds significant high/low for each symbol
+        
+        Args:
+            max_symbols: Limit number of symbols to process (for testing)
+            specific_symbol: Process only this specific symbol (overrides max_symbols)
         """
         
         print("=" * 80)
-        print("DETECTING VIBRATION LAWS FOR ALL SYMBOLS")
+        if specific_symbol:
+            print(f"DETECTING VIBRATION LAW FOR SYMBOL: {specific_symbol}")
+        else:
+            print("DETECTING VIBRATION LAWS FOR ALL SYMBOLS")
         print("=" * 80)
         print(f"Processing symbols from symbol_discovery.csv...")
         
-        all_symbols = list(self.symbol_loader.symbols.keys())
-        if max_symbols:
-            all_symbols = all_symbols[:max_symbols]
-            print(f"Limited to first {max_symbols} symbols for testing")
+        if specific_symbol:
+            # Process only the specified symbol
+            config = self.symbol_loader.get_symbol_config(specific_symbol)
+            if config is None:
+                print(f"ERROR: Symbol '{specific_symbol}' not found in symbol_discovery.csv")
+                return {}
+            # Use the actual symbol name from config (handles case differences)
+            actual_symbol = config.symbol
+            all_symbols = [actual_symbol]
+            print(f"Processing single symbol: {actual_symbol}")
+        else:
+            # Process all symbols or limited set
+            all_symbols = list(self.symbol_loader.symbols.keys())
+            if max_symbols:
+                all_symbols = all_symbols[:max_symbols]
+                print(f"Limited to first {max_symbols} symbols for testing")
         
         print(f"Total symbols to process: {len(all_symbols)}")
         
@@ -759,10 +779,17 @@ class MultiSymbolAspectCalculator:
             return {}
     
     def calculate_timing_for_all_symbols(self, start_date: datetime.datetime, end_date: datetime.datetime,
-                                       step_hours: float = 6.0, vibration_csv: str = None) -> Dict[str, List[Dict]]:
+                                       step_hours: float = 6.0, vibration_csv: str = None, specific_symbol: str = None) -> Dict[str, List[Dict]]:
         """
-        Calculate timing for all symbols using their detected vibration laws
+        Calculate timing for symbols using their detected vibration laws
         This is the equivalent of calculate_aspects.py but for multiple symbols
+        
+        Args:
+            start_date: Start date for timing calculation
+            end_date: End date for timing calculation
+            step_hours: Time step in hours for calculation precision
+            vibration_csv: Path to vibration laws CSV file
+            specific_symbol: Process only this specific symbol (if provided)
         """
         # Load vibration laws
         vibrations = self.load_vibration_laws_from_csv(vibration_csv)
@@ -770,7 +797,24 @@ class MultiSymbolAspectCalculator:
             print("ERROR: No vibration laws loaded")
             return {}
         
-        print(f"\n=== CALCULATING TIMING FOR {len(vibrations)} SYMBOLS ===")
+        if specific_symbol:
+            # Process only the specified symbol
+            # Find the actual symbol name (handle case differences)
+            actual_symbol = None
+            for symbol_key in vibrations.keys():
+                if symbol_key.upper() == specific_symbol.upper():
+                    actual_symbol = symbol_key
+                    break
+            
+            if actual_symbol is None:
+                print(f"ERROR: Symbol '{specific_symbol}' not found in vibration laws")
+                return {}
+            
+            vibrations = {actual_symbol: vibrations[actual_symbol]}
+            print(f"\n=== CALCULATING TIMING FOR SYMBOL: {actual_symbol} ===")
+        else:
+            print(f"\n=== CALCULATING TIMING FOR {len(vibrations)} SYMBOLS ===")
+        
         print(f"Date range: {start_date} to {end_date}")
         print(f"Step: {step_hours} hours")
         
@@ -859,8 +903,18 @@ class MultiSymbolAspectCalculator:
                     target_angle = aspect_info['angle']
                     orb = aspect_info['orb']
                     
-                    # Check if current angle matches target aspect within orb
-                    angle_diff = abs(current_angle - target_angle)
+                    # For Gann angles > 180°, we need to use the complement for matching
+                    # because planetary separations are normalized to ≤180°
+                    if target_angle > 180:
+                        # Convert high Gann angle to its complement for matching
+                        effective_target = 360 - target_angle
+                        angle_to_record = target_angle  # But record the original angle
+                    else:
+                        effective_target = target_angle
+                        angle_to_record = current_angle
+                    
+                    # Check if current angle matches effective target within orb
+                    angle_diff = abs(current_angle - effective_target)
                     if angle_diff > 180:
                         angle_diff = 360 - angle_diff
                     
@@ -881,7 +935,7 @@ class MultiSymbolAspectCalculator:
                             'aspect_abbrev': aspect_info['abbrev'],
                             'planet1_degrees': round(pos1, 4),
                             'planet2_degrees': round(pos2, 4),
-                            'aspect_angle': round(current_angle, 4),
+                            'aspect_angle': round(angle_to_record, 4),
                             'target_angle': target_angle,
                             'angle_diff': round(angle_diff, 4),
                             'exact_jd': current_jd,
@@ -1107,19 +1161,27 @@ def example_usage():
     )
     calculator.export_to_csv(sp500_aspects, "sp500_aspects.csv")
 
-def calculate_timing_for_symbols():
-    """Calculate timing for all symbols using their detected vibration laws"""
+def calculate_timing_for_symbols(specific_symbol: str = None):
+    """Calculate timing for symbols using their detected vibration laws
+    
+    Args:
+        specific_symbol: If provided, calculate timing only for this symbol
+    """
     calculator = MultiSymbolAspectCalculator(output_folder="MultiSymbolResults")
     
-    print("=== CALCULATING TIMING FOR ALL SYMBOLS ===")
+    if specific_symbol:
+        print(f"=== CALCULATING TIMING FOR SYMBOL: {specific_symbol} ===")
+    else:
+        print("=== CALCULATING TIMING FOR ALL SYMBOLS ===")
     
-    # Calculate timing aspects for all symbols using their vibration laws
+    # Calculate timing aspects for symbols using their vibration laws
     # This is similar to calculate_aspects.py but for multiple symbols
     symbol_timing = calculator.calculate_timing_for_all_symbols(
         start_date=datetime.datetime(2020, 1, 1),
         end_date=datetime.datetime(2030, 12, 31),
         step_hours=6.0,  # 6-hour precision like calculate_aspects.py
-        vibration_csv="MultiSymbolResults/all_symbols_gann_angles.csv"
+        vibration_csv="MultiSymbolResults/all_symbols_gann_angles.csv",
+        specific_symbol=specific_symbol
     )
     
     if symbol_timing:
@@ -1142,23 +1204,39 @@ def calculate_timing_for_symbols():
         print("ERROR: No timing aspects calculated")
         return None
 
-def main():
-    """Main function - Generate dynamic Gann angles for all symbols"""
+def main(specific_symbol: str = None):
+    """Main function - Generate dynamic Gann angles for symbols
+    
+    Args:
+        specific_symbol: If provided, process only this symbol
+    """
     calculator = MultiSymbolAspectCalculator(output_folder="MultiSymbolResults")
     
-    print("=== GENERATING DYNAMIC GANN ANGLES FOR ALL SYMBOLS ===")
-    print(f"[OK] Loaded {len(calculator.symbol_loader.symbols)} symbols")
+    if specific_symbol:
+        print(f"=== GENERATING DYNAMIC GANN ANGLES FOR SYMBOL: {specific_symbol} ===")
+        if calculator.symbol_loader.get_symbol_config(specific_symbol) is None:
+            print(f"ERROR: Symbol '{specific_symbol}' not found in symbol_discovery.csv")
+            available_symbols = list(calculator.symbol_loader.symbols.keys())[:10]
+            print(f"Available symbols (first 10): {available_symbols}")
+            return None
+    else:
+        print("=== GENERATING DYNAMIC GANN ANGLES FOR ALL SYMBOLS ===")
+        print(f"[OK] Loaded {len(calculator.symbol_loader.symbols)} symbols")
+        
+        # Show available symbols by category
+        categories = calculator.symbol_loader.list_symbols_by_category()
+        for category, symbols in categories.items():
+            print(f"[OK] {category}: {len(symbols)} symbols")
     
-    # Show available symbols by category
-    categories = calculator.symbol_loader.list_symbols_by_category()
-    for category, symbols in categories.items():
-        print(f"[OK] {category}: {len(symbols)} symbols")
+    # Generate dynamic Gann angles for symbols
+    if specific_symbol:
+        print(f"\n=== DETECTING VIBRATION LAW FOR SYMBOL: {specific_symbol} ===")
+        print("This will get MT5 history for the specified symbol...")
+    else:
+        print("\n=== DETECTING VIBRATION LAWS FOR ALL SYMBOLS ===")
+        print("This will take time as it processes each symbol's MT5 history...")
     
-    # Generate dynamic Gann angles for ALL symbols
-    print("\n=== DETECTING VIBRATION LAWS FOR ALL SYMBOLS ===")
-    print("This will take time as it processes each symbol's MT5 history...")
-    
-    vibrations = calculator.detect_all_symbol_vibrations()  # No limit - all symbols
+    vibrations = calculator.detect_all_symbol_vibrations(specific_symbol=specific_symbol)
     
     if vibrations:
         # Save complete CSV with dynamic Gann angles
@@ -1181,22 +1259,38 @@ def main():
 if __name__ == "__main__":
     print("=== MULTISYMBOL ASPECTS CALCULATOR ===")
     print("Choose operation:")
-    print("1. Generate vibration laws (main)")
-    print("2. Calculate timing for all symbols") 
-    print("3. Both (recommended)")
+    print("1. Generate vibration laws (all symbols)")
+    print("2. Generate vibration laws (specific symbol)")
+    print("3. Calculate timing (all symbols)")
+    print("4. Calculate timing (specific symbol)")
+    print("5. Both operations (all symbols)")
+    print("6. Both operations (specific symbol)")
     
-    choice = input("Enter choice (1-3): ").strip()
+    choice = input("Enter choice (1-6): ").strip()
     
     if choice == "1":
         main()
     elif choice == "2":
-        calculate_timing_for_symbols()
+        symbol = input("Enter symbol name (e.g., EURUSD, XAUUSD): ").strip().upper()
+        main(specific_symbol=symbol)
     elif choice == "3":
-        print("Running both operations...")
+        calculate_timing_for_symbols()
+    elif choice == "4":
+        symbol = input("Enter symbol name (e.g., EURUSD, XAUUSD): ").strip().upper()
+        calculate_timing_for_symbols(specific_symbol=symbol)
+    elif choice == "5":
+        print("Running both operations for all symbols...")
         vibrations = main()
         if vibrations:
             print("\nNow calculating timing...")
             calculate_timing_for_symbols()
+    elif choice == "6":
+        symbol = input("Enter symbol name (e.g., EURUSD, XAUUSD): ").strip().upper()
+        print(f"Running both operations for symbol: {symbol}...")
+        vibrations = main(specific_symbol=symbol)
+        if vibrations:
+            print(f"\nNow calculating timing for {symbol}...")
+            calculate_timing_for_symbols(specific_symbol=symbol)
     else:
         print("Invalid choice, running main() by default")
         main()

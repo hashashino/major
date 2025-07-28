@@ -330,6 +330,10 @@ color GetAspectColor(string aspect_type)
 //+------------------------------------------------------------------+
 //| Main calculation function                                       |
 //+------------------------------------------------------------------+
+// Static variables to prevent constant redrawing
+static datetime last_update_time = 0;
+static int last_aspects_drawn = 0;
+
 int OnCalculate(const int rates_total,
                 const int prev_calculated,
                 const datetime &time[],
@@ -341,11 +345,37 @@ int OnCalculate(const int rates_total,
                 const long &volume[],
                 const int &spread[])
 {
-    // Clear previous aspect objects
+    // Only update aspects when a new bar forms or on first run
+    datetime current_time = TimeCurrent();
+    static datetime last_bar_time = 0;
+    static ENUM_TIMEFRAMES last_timeframe = PERIOD_CURRENT;
+    
+    if(rates_total > 0)
+    {
+        datetime current_bar_time = time[rates_total-1];
+        ENUM_TIMEFRAMES current_timeframe = Period();
+        
+        // Only redraw if new bar formed, first run, timeframe changed, or significant time passed
+        bool should_update = (prev_calculated == 0) ||  // First run
+                            (current_bar_time != last_bar_time) ||  // New bar
+                            (current_timeframe != last_timeframe) ||  // Timeframe changed
+                            (current_time - last_update_time > 3600); // Every hour
+        
+        if(!should_update)
+        {
+            // Update comment only
+            Comment(StringFormat("%s | Aspects: %d (cached)", g_current_symbol, last_aspects_drawn));
+            return rates_total;
+        }
+        
+        last_bar_time = current_bar_time;
+        last_timeframe = current_timeframe;
+    }
+    
+    // Clear previous aspect objects only when updating
     ObjectsDeleteAll(0, "PLANETARY_ASPECT_");
     
     // Determine time range for aspect display
-    datetime current_time = TimeCurrent();
     datetime start_time = current_time - LookBackDays * 24 * 3600;
     datetime end_time = current_time + LookAheadDays * 24 * 3600;
     
@@ -363,6 +393,10 @@ int OnCalculate(const int rates_total,
             }
         }
     }
+    
+    // Update static variables
+    last_update_time = current_time;
+    last_aspects_drawn = aspects_drawn;
     
     // Simple chart comment
     Comment(StringFormat("%s | Aspects: %d", g_current_symbol, aspects_drawn));
