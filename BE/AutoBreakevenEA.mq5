@@ -171,6 +171,8 @@ void OnTick()
 void CheckAndModifyPositions()
 {
     int totalPositions = PositionsTotal();
+    if(WriteToLog && totalPositions > 0)
+        Print("=== CHECKING ", totalPositions, " POSITIONS ===");
     if(totalPositions == 0) return;
     
     // First check for auto close if enabled
@@ -200,7 +202,14 @@ void CheckAndModifyPositions()
         datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
         
         // Skip if UseOnlyCurrentSymbol is true and symbol doesn't match
-        if(UseOnlyCurrentSymbol && symbol != _Symbol) continue;
+        if(UseOnlyCurrentSymbol && symbol != _Symbol) 
+        {
+            if(WriteToLog) Print("Position #", ticket, " skipped - different symbol (", symbol, " vs ", _Symbol, ")");
+            continue;
+        }
+        
+        if(WriteToLog) 
+            Print("Processing position #", ticket, " (", symbol, ") - SL:", currentSL, " TP:", currentTP, " OpenTime:", TimeToString(openTime));
         
         // Get current market price
         MqlTick tick;
@@ -232,13 +241,30 @@ void CheckAndModifyPositions()
         // First, check if we need to set initial SL for positions without SL
         // This check is done BEFORE the profit percentage check to ensure all positions get SL
         bool needsInitialSL = false;
-        if(SetInitialSL && !IsPositionProcessedForSL(ticket))
+        if(SetInitialSL)
         {
-            // Check if we should set initial SL
+            if(WriteToLog) 
+                Print("Position #", ticket, " - Checking initial SL. Current SL: ", currentSL, " SetInitialSL: ", SetInitialSL);
+            
+            // Check if we should set initial SL - always check positions without SL
             if(currentSL == 0)
-                needsInitialSL = true; // No SL exists
-            else if(OverrideExistingSL)
-                needsInitialSL = true; // Override existing SL
+            {
+                needsInitialSL = true; // No SL exists - always process
+                if(WriteToLog) Print("Position #", ticket, " needs initial SL - no SL exists");
+            }
+            else if(OverrideExistingSL && !IsPositionProcessedForSL(ticket))
+            {
+                needsInitialSL = true; // Override existing SL only if not processed before
+                if(WriteToLog) Print("Position #", ticket, " needs initial SL - override enabled and not processed");
+            }
+            else if(WriteToLog)
+            {
+                Print("Position #", ticket, " does not need initial SL. OverrideExistingSL: ", OverrideExistingSL, " IsProcessed: ", IsPositionProcessedForSL(ticket));
+            }
+        }
+        else if(WriteToLog)
+        {
+            Print("Position #", ticket, " - SetInitialSL is disabled");
         }
         
         if(needsInitialSL)
@@ -324,12 +350,12 @@ void CheckAndModifyPositions()
                 Print("Position #", ticket, " already has SL (", currentSL, "), override disabled");
         }
         
-        // Check minimum profit percentage for breakeven processing
-        double profitPercent = MathAbs(profitInPoints * pointSize / openPrice) * 100;
-        if(profitPercent < MinProfitPercent) continue;
-        
         // Check if position is already processed for breakeven
         if(IsPositionProcessed(ticket)) continue;
+        
+        // Check minimum profit percentage for breakeven processing only
+        double profitPercent = MathAbs(profitInPoints * pointSize / openPrice) * 100;
+        if(profitPercent < MinProfitPercent) continue;
         
         // BREAKEVEN LOGIC - Only proceed if not managed by trailing stop
         if(EnableTrailingStop && IsTrailingManagedPosition(ticket)) 
